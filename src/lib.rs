@@ -1,3 +1,4 @@
+#![no_std]
 //! Smoltcp device implementation for external ethernet MACs.
 //!
 //! # Design
@@ -6,11 +7,11 @@
 //!
 //! Smoltcp must own a means to communicate with the PHY. However, smoltcp may have multiple RX/TX
 //! tokens in flight. Because of this, when Smoltcp tries to consume an RX/TX token, it would have
-//! to also own the means to transmit or review via the MAC.
+//! to also own the means to transmit or recieve via the MAC.
 //!
 //! Because the `receive()` API of [smoltcp::phy::Device] requires provisioning two tokens, it's
 //! not possible for each token to own a mutable reference to the underlying MAC. To get around
-//! this, the MAC is not owned by smoltp at all, but rather Smoltcp is given a software device with
+//! this, the MAC is not owned by smoltcp at all, but rather Smoltcp is given a software device with
 //! RX and TX FIFOs to the driver that handles ingress and egress on the MAC. With this design,
 //! Smoltcp can allocate a frame buffer for a TX frame and populate it. When ready to transmit,
 //! it then enqueues the prepared frame in the FIFO.
@@ -59,6 +60,9 @@ pub trait ExternalMac {
     /// * `frame` - The ethernet frame to send.
     fn send_frame(&mut self, frame: &[u8]) -> Result<(), Self::Error>;
 }
+
+#[cfg(feature = "cortex-m")]
+const DEFAULT_NUM_FRAMES: usize = 8;
 
 // The maximum size of each ethernet frame.
 const DEFAULT_MTU_SIZE: usize = 1500;
@@ -134,6 +138,41 @@ pub struct Manager<'tx, 'rx, Mac: ExternalMac, const TX: usize, const RX: usize>
     frame_pool: &'static heapless::pool::Pool<Frame>,
     tx: &'tx heapless::mpmc::MpMcQueue<PooledFrame, TX>,
     rx: heapless::spsc::Producer<'rx, PooledFrame, RX>,
+}
+
+#[cfg(feature = "cortex-m")]
+/// Construct a driver for usage with smoltcp using sensible defaults.
+///
+/// # Note
+/// It is only safe to call this function once. Multiple calls will cause a panic.
+///
+/// # Args
+/// * `mac` - The external MAC to use for frame transmission and reception
+/// * `storage` - Raw binary storage needed for allocating ethernet frames from.
+///
+/// # Returns
+/// (manager, device) See [`Manager::new()`]
+pub fn new_default<Mac: ExternalMac>(
+    mac: Mac,
+    storage: &'static mut [u8],
+) -> (
+    SmoltcpDevice<'static, 'static, DEFAULT_NUM_FRAMES, DEFAULT_NUM_FRAMES>,
+    Manager<'static, 'static, Mac, DEFAULT_NUM_FRAMES, DEFAULT_NUM_FRAMES>,
+) {
+    let rx_queue = cortex_m::singleton!(:
+        heapless::spsc::Queue<PooledFrame, DEFAULT_NUM_FRAMES> = heapless::spsc::Queue::new())
+    .unwrap();
+    let tx_queue = cortex_m::singleton!(:
+        heapless::mpmc::MpMcQueue<PooledFrame, DEFAULT_NUM_FRAMES> = heapless::mpmc::MpMcQueue::new())
+    .unwrap();
+
+    // Create a static frame pool to allocate buffer space for ethernet frames into.
+    let frame_pool =
+        cortex_m::singleton!(: heapless::pool::Pool<Frame> = heapless::pool::Pool::new()).unwrap();
+
+    frame_pool.grow(storage);
+
+    Manager::new(mac, frame_pool, tx_queue, rx_queue)
 }
 
 impl<'tx, 'rx, Mac: ExternalMac, const TX: usize, const RX: usize> Manager<'tx, 'rx, Mac, TX, RX> {

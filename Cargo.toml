@@ -8,3 +8,8 @@ edition = "2021"
 [dependencies]
 smoltcp-nal = "0.2"
 heapless = "0.7"
+cortex-m = { version = "0.7", optional = true }
+
+[features]
+default = []
+cortex-m = ["dep:cortex-m"]
